@@ -237,6 +237,10 @@ public final class KvTablet {
         return kvTabletDir;
     }
 
+    public Schema getSchema() {
+        return schema;
+    }
+
     void setFlushedLogOffset(long flushedLogOffset) {
         this.flushedLogOffset = flushedLogOffset;
     }
@@ -481,6 +485,57 @@ public final class KvTablet {
                     rocksDBKv.checkIfRocksDBClosed();
                     return rocksDBKv.prefixLookup(prefixKey);
                 });
+    }
+
+    public List<byte[]> rangeLookup(
+            byte[] prefixKey,
+            List<org.apache.fluss.server.kv.rocksdb.RangeCondition> rangeConditions,
+            Integer limit)
+            throws IOException {
+        return inReadLock(
+                kvLock,
+                () -> {
+                    rocksDBKv.checkIfRocksDBClosed();
+                    // Create fieldExtractor for proper range condition evaluation
+                    org.apache.fluss.server.kv.rocksdb.ValueFieldExtractor fieldExtractor =
+                            createValueFieldExtractor();
+                    return rocksDBKv.rangeLookup(prefixKey, rangeConditions, limit, fieldExtractor);
+                });
+    }
+
+    public List<byte[]> rangeLookup(
+            byte[] prefixKey,
+            List<org.apache.fluss.server.kv.rocksdb.RangeCondition> rangeConditions,
+            Integer limit,
+            org.apache.fluss.server.kv.rocksdb.ValueFieldExtractor fieldExtractor)
+            throws IOException {
+        return inReadLock(
+                kvLock,
+                () -> {
+                    rocksDBKv.checkIfRocksDBClosed();
+                    return rocksDBKv.rangeLookup(prefixKey, rangeConditions, limit, fieldExtractor);
+                });
+    }
+
+    /**
+     * Creates a ValueFieldExtractor for this tablet's schema. This is used for range condition
+     * evaluation during range lookups.
+     */
+    public org.apache.fluss.server.kv.rocksdb.ValueFieldExtractor createValueFieldExtractor() {
+        // Create ValueDecoder using the same logic as putAsLeader method
+        RowType rowType = schema.getRowType();
+        DataType[] fieldTypes = rowType.getChildren().toArray(new DataType[0]);
+
+        // Create read context for decoding KV records
+        KvRecordBatch.ReadContext readContext =
+                KvRecordReadContext.createReadContext(kvFormat, fieldTypes);
+
+        // Create ValueDecoder with the row decoder - use schema id 0 as default
+        // In a real scenario, you might want to handle multiple schema versions
+        short schemaId = 0;
+        ValueDecoder valueDecoder = new ValueDecoder(readContext.getRowDecoder(schemaId));
+
+        return new org.apache.fluss.server.kv.rocksdb.ValueFieldExtractor(valueDecoder, rowType);
     }
 
     public List<byte[]> limitScan(int limit) throws IOException {

@@ -36,6 +36,7 @@ public class SchemaJsonSerde implements JsonSerializer<Schema>, JsonDeserializer
 
     private static final String COLUMNS_NAME = "columns";
     private static final String PRIMARY_KEY_NAME = "primary_key";
+    private static final String SORT_KEY_NAME = "sort_key";
     private static final String VERSION_KEY = "version";
     private static final int VERSION = 1;
 
@@ -62,6 +63,14 @@ public class SchemaJsonSerde implements JsonSerializer<Schema>, JsonDeserializer
             generator.writeEndArray();
         }
 
+        // serialize sortKey field if present
+        if (schema.hasSortKey()) {
+            Optional<String> sortKeyField = schema.getSortKeyField();
+            if (sortKeyField.isPresent()) {
+                generator.writeStringField(SORT_KEY_NAME, sortKeyField.get());
+            }
+        }
+
         generator.writeEndObject();
     }
 
@@ -81,6 +90,12 @@ public class SchemaJsonSerde implements JsonSerializer<Schema>, JsonDeserializer
                 primaryKeys.add(primaryKeyJsons.next().asText());
             }
             builder.primaryKey(primaryKeys);
+        }
+
+        // deserialize sortKey field if present
+        if (node.has(SORT_KEY_NAME)) {
+            String sortKeyField = node.get(SORT_KEY_NAME).asText();
+            builder.sortKey(sortKeyField);
         }
 
         return builder.build();

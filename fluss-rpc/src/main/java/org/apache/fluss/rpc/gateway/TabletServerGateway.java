@@ -42,6 +42,8 @@ import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.messages.PutKvRequest;
 import org.apache.fluss.rpc.messages.PutKvResponse;
+import org.apache.fluss.rpc.messages.RangeLookupRequest;
+import org.apache.fluss.rpc.messages.RangeLookupResponse;
 import org.apache.fluss.rpc.messages.StopReplicaRequest;
 import org.apache.fluss.rpc.messages.StopReplicaResponse;
 import org.apache.fluss.rpc.messages.UpdateMetadataRequest;
@@ -120,6 +122,15 @@ public interface TabletServerGateway extends RpcGateway, AdminReadOnlyGateway {
      */
     @RPC(api = ApiKeys.PREFIX_LOOKUP)
     CompletableFuture<PrefixLookupResponse> prefixLookup(PrefixLookupRequest request);
+
+    /**
+     * Range lookup to get values by prefix key and range conditions.
+     *
+     * @param request the range lookup request
+     * @return the range lookup response
+     */
+    @RPC(api = ApiKeys.RANGE_LOOKUP)
+    CompletableFuture<RangeLookupResponse> rangeLookup(RangeLookupRequest request);
 
     /**
      * Get limit number of values from the specified table bucket.

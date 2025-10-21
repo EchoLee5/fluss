@@ -179,4 +179,10 @@ class PrefixKeyLookuper implements Lookuper {
                             return new LookupResult(rowList);
                         });
     }
+
+    @Override
+    public CompletableFuture<LookupResult> rangeLookup(
+            InternalRow prefixKey, Object lowerBound, Object upperBound) {
+        return null;
+    }
 }

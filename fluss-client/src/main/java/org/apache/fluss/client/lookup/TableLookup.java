@@ -56,11 +56,17 @@ public class TableLookup implements Lookup {
 
     @Override
     public Lookuper createLookuper() {
-        if (lookupColumnNames == null) {
-            return new PrimaryKeyLookuper(tableInfo, metadataUpdater, lookupClient);
-        } else {
+        if (lookupColumnNames != null) {
             return new PrefixKeyLookuper(
                     tableInfo, metadataUpdater, lookupClient, lookupColumnNames);
+        } else if (tableInfo.getSchema().hasSortKey()) {
+            return new RangeKeyLookuper(
+                    tableInfo,
+                    metadataUpdater,
+                    lookupClient,
+                    tableInfo.getSchema().getSortKeyField().get());
+        } else {
+            return new PrimaryKeyLookuper(tableInfo, metadataUpdater, lookupClient);
         }
     }
 }

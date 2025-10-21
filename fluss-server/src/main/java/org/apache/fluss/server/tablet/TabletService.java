@@ -50,12 +50,18 @@ import org.apache.fluss.rpc.messages.NotifyLeaderAndIsrRequest;
 import org.apache.fluss.rpc.messages.NotifyLeaderAndIsrResponse;
 import org.apache.fluss.rpc.messages.NotifyRemoteLogOffsetsRequest;
 import org.apache.fluss.rpc.messages.NotifyRemoteLogOffsetsResponse;
+import org.apache.fluss.rpc.messages.PbRangeCondition;
+import org.apache.fluss.rpc.messages.PbRangeLookupReqForBucket;
+import org.apache.fluss.rpc.messages.PbRangeLookupRespForBucket;
+import org.apache.fluss.rpc.messages.PbValueList;
 import org.apache.fluss.rpc.messages.PrefixLookupRequest;
 import org.apache.fluss.rpc.messages.PrefixLookupResponse;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.messages.PutKvRequest;
 import org.apache.fluss.rpc.messages.PutKvResponse;
+import org.apache.fluss.rpc.messages.RangeLookupRequest;
+import org.apache.fluss.rpc.messages.RangeLookupResponse;
 import org.apache.fluss.rpc.messages.StopReplicaRequest;
 import org.apache.fluss.rpc.messages.StopReplicaResponse;
 import org.apache.fluss.rpc.messages.UpdateMetadataRequest;
@@ -70,16 +76,19 @@ import org.apache.fluss.server.authorizer.Authorizer;
 import org.apache.fluss.server.coordinator.MetadataManager;
 import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.entity.NotifyLeaderAndIsrData;
+import org.apache.fluss.server.kv.rocksdb.RangeCondition;
 import org.apache.fluss.server.log.FetchParams;
 import org.apache.fluss.server.log.ListOffsetsParam;
 import org.apache.fluss.server.metadata.TabletServerMetadataCache;
 import org.apache.fluss.server.metadata.TabletServerMetadataProvider;
+import org.apache.fluss.server.replica.RangeLookupParams;
 import org.apache.fluss.server.replica.ReplicaManager;
 import org.apache.fluss.server.utils.ServerRpcMessageUtils;
 import org.apache.fluss.server.zk.ZooKeeperClient;
 
 import javax.annotation.Nullable;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -262,6 +271,176 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
                 prefixLookupData,
                 value -> response.complete(makePrefixLookupResponse(value, errorResponseMap)));
         return response;
+    }
+
+    @Override
+    public CompletableFuture<RangeLookupResponse> rangeLookup(RangeLookupRequest request) {
+        // TODO: Implement proper data parsing and authorization for range lookup
+        // This is a more complete implementation framework
+        authorizeTable(READ, request.getTableId());
+
+        CompletableFuture<RangeLookupResponse> response = new CompletableFuture<>();
+        try {
+            // Parse range lookup data from request
+            Map<TableBucket, RangeLookupParams> rangeLookupData = toRangeLookupData(request);
+            Map<TableBucket, PrefixLookupResultForBucket> errorResponseMap = new HashMap<>();
+
+            // Authorize the request data
+            // TODO: Implement proper authorization for range lookup data
+
+            if (rangeLookupData.isEmpty()) {
+                response.complete(new RangeLookupResponse());
+                return response;
+            }
+
+            // Execute range lookup through replica manager
+            replicaManager.rangeLookups(
+                    rangeLookupData,
+                    value -> response.complete(makeRangeLookupResponse(value, errorResponseMap)));
+        } catch (Exception e) {
+            // Handle errors gracefully
+            response.complete(new RangeLookupResponse());
+        }
+        return response;
+    }
+
+    // Helper methods for range lookup data processing
+    private Map<TableBucket, RangeLookupParams> toRangeLookupData(RangeLookupRequest request) {
+        long tableId = request.getTableId();
+        Map<TableBucket, RangeLookupParams> rangeLookupData = new HashMap<>();
+
+        for (PbRangeLookupReqForBucket rangeLookupReqForBucket : request.getBucketsReqsList()) {
+            // Create TableBucket identifier
+            TableBucket tb =
+                    new TableBucket(
+                            tableId,
+                            rangeLookupReqForBucket.hasPartitionId()
+                                    ? rangeLookupReqForBucket.getPartitionId()
+                                    : null,
+                            rangeLookupReqForBucket.getBucketId());
+
+            // Extract prefix keys
+            List<byte[]> prefixKeys = new ArrayList<>(rangeLookupReqForBucket.getPrefixKeysCount());
+            for (int i = 0; i < rangeLookupReqForBucket.getPrefixKeysCount(); i++) {
+                prefixKeys.add(rangeLookupReqForBucket.getPrefixKeyAt(i));
+            }
+
+            // Extract and convert range conditions from the request
+            List<RangeCondition> allRangeConditions = new ArrayList<>();
+            for (int i = 0; i < rangeLookupReqForBucket.getRangeConditionsCount(); i++) {
+                PbRangeCondition pbRangeCondition = rangeLookupReqForBucket.getRangeConditionAt(i);
+
+                // Convert PbRangeCondition to server-side RangeCondition
+                // Now bounds are directly integers, no deserialization needed
+                Integer lowerBound =
+                        pbRangeCondition.hasLowerBound() ? pbRangeCondition.getLowerBound() : null;
+                Integer upperBound =
+                        pbRangeCondition.hasUpperBound() ? pbRangeCondition.getUpperBound() : null;
+
+                RangeCondition rangeCondition =
+                        new RangeCondition(
+                                pbRangeCondition.getFieldName(),
+                                lowerBound,
+                                upperBound,
+                                pbRangeCondition.hasLowerInclusive()
+                                        ? pbRangeCondition.isLowerInclusive()
+                                        : true,
+                                pbRangeCondition.hasUpperInclusive()
+                                        ? pbRangeCondition.isUpperInclusive()
+                                        : true);
+                allRangeConditions.add(rangeCondition);
+            }
+
+            // Create range conditions list - handle different scenarios intelligently
+            List<List<RangeCondition>> rangeConditions = new ArrayList<>();
+            if (allRangeConditions.isEmpty()) {
+                // No range conditions: each prefix key gets an empty condition list
+                for (int i = 0; i < prefixKeys.size(); i++) {
+                    rangeConditions.add(new ArrayList<>());
+                }
+            } else if (allRangeConditions.size() == 1) {
+                // Single range condition: apply to all prefix keys
+                for (int i = 0; i < prefixKeys.size(); i++) {
+                    rangeConditions.add(new ArrayList<>(allRangeConditions));
+                }
+            } else if (allRangeConditions.size() == prefixKeys.size()) {
+                // One-to-one mapping: each prefix key gets one condition
+                for (RangeCondition condition : allRangeConditions) {
+                    rangeConditions.add(List.of(condition));
+                }
+            } else {
+                // Complex case: apply all conditions to all prefix keys
+                for (int i = 0; i < prefixKeys.size(); i++) {
+                    rangeConditions.add(new ArrayList<>(allRangeConditions));
+                }
+            }
+
+            // Extract limits (one limit per prefix key)
+            List<Integer> limits = new ArrayList<>();
+            if (rangeLookupReqForBucket.hasLimit()) {
+                // Apply the same limit to all prefix keys in this bucket
+                int limit = rangeLookupReqForBucket.getLimit();
+                for (int i = 0; i < prefixKeys.size(); i++) {
+                    limits.add(limit);
+                }
+            } else {
+                // No limit specified, use null/default
+                for (int i = 0; i < prefixKeys.size(); i++) {
+                    limits.add(null);
+                }
+            }
+
+            // Create RangeLookupParams and add to result map
+            RangeLookupParams params = new RangeLookupParams(prefixKeys, rangeConditions, limits);
+            rangeLookupData.put(tb, params);
+        }
+
+        return rangeLookupData;
+    }
+
+    private RangeLookupResponse makeRangeLookupResponse(
+            Map<TableBucket, PrefixLookupResultForBucket> results,
+            Map<TableBucket, PrefixLookupResultForBucket> errorResponseMap) {
+        // Merge results and errors
+        Map<TableBucket, PrefixLookupResultForBucket> allResults = new HashMap<>(results);
+        allResults.putAll(errorResponseMap);
+
+        return makeRangeLookupResponse(allResults);
+    }
+
+    private RangeLookupResponse makeRangeLookupResponse(
+            Map<TableBucket, PrefixLookupResultForBucket> rangeLookupResult) {
+        RangeLookupResponse rangeLookupResponse = new RangeLookupResponse();
+        List<PbRangeLookupRespForBucket> resultForAll = new ArrayList<>();
+
+        for (Map.Entry<TableBucket, PrefixLookupResultForBucket> entry :
+                rangeLookupResult.entrySet()) {
+            PbRangeLookupRespForBucket respForBucket = new PbRangeLookupRespForBucket();
+            TableBucket tb = entry.getKey();
+            respForBucket.setBucketId(tb.getBucket());
+            if (tb.getPartitionId() != null) {
+                respForBucket.setPartitionId(tb.getPartitionId());
+            }
+
+            PrefixLookupResultForBucket bucketResult = entry.getValue();
+            if (bucketResult.failed()) {
+                respForBucket.setErrorCode(bucketResult.getErrorCode());
+                respForBucket.setErrorMessage(bucketResult.getErrorMessage());
+            } else {
+                List<PbValueList> keyResultList = new ArrayList<>();
+                for (List<byte[]> res : bucketResult.prefixLookupValues()) {
+                    PbValueList pbValueList = new PbValueList();
+                    for (byte[] bytes : res) {
+                        pbValueList.addValue(bytes);
+                    }
+                    keyResultList.add(pbValueList);
+                }
+                respForBucket.addAllValueLists(keyResultList);
+            }
+            resultForAll.add(respForBucket);
+        }
+        rangeLookupResponse.addAllBucketsResps(resultForAll);
+        return rangeLookupResponse;
     }
 
     @Override

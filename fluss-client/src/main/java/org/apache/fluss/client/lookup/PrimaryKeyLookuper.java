@@ -136,4 +136,10 @@ class PrimaryKeyLookuper implements Lookuper {
                             return new LookupResult(row);
                         });
     }
+
+    @Override
+    public CompletableFuture<LookupResult> rangeLookup(
+            InternalRow prefixKey, Object lowerBound, Object upperBound) {
+        return null;
+    }
 }

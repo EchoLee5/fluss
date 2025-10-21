@@ -20,6 +20,9 @@ package org.apache.fluss.client.utils;
 import org.apache.fluss.client.admin.OffsetSpec;
 import org.apache.fluss.client.lookup.LookupBatch;
 import org.apache.fluss.client.lookup.PrefixLookupBatch;
+import org.apache.fluss.client.lookup.RangeCondition;
+import org.apache.fluss.client.lookup.RangeLookupBatch;
+import org.apache.fluss.client.lookup.RangeLookupQuery;
 import org.apache.fluss.client.metadata.KvSnapshotMetadata;
 import org.apache.fluss.client.metadata.KvSnapshots;
 import org.apache.fluss.client.metadata.LakeSnapshot;
@@ -56,10 +59,13 @@ import org.apache.fluss.rpc.messages.PbPartitionSpec;
 import org.apache.fluss.rpc.messages.PbPrefixLookupReqForBucket;
 import org.apache.fluss.rpc.messages.PbProduceLogReqForBucket;
 import org.apache.fluss.rpc.messages.PbPutKvReqForBucket;
+import org.apache.fluss.rpc.messages.PbRangeCondition;
+import org.apache.fluss.rpc.messages.PbRangeLookupReqForBucket;
 import org.apache.fluss.rpc.messages.PbRemotePathAndLocalFile;
 import org.apache.fluss.rpc.messages.PrefixLookupRequest;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.PutKvRequest;
+import org.apache.fluss.rpc.messages.RangeLookupRequest;
 
 import javax.annotation.Nullable;
 
@@ -175,6 +181,104 @@ public class ClientRpcMessageUtils {
                     batch.lookups().forEach(get -> pbPrefixLookupReqForBucket.addKey(get.key()));
                 });
         return request;
+    }
+
+    public static RangeLookupRequest makeRangeLookupRequest(
+            long tableId, Collection<RangeLookupBatch> lookupBatches) {
+        RangeLookupRequest request = new RangeLookupRequest().setTableId(tableId);
+        lookupBatches.forEach(
+                (batch) -> {
+                    TableBucket tb = batch.tableBucket();
+                    PbRangeLookupReqForBucket pbRangeLookupReqForBucket =
+                            request.addBucketsReq().setBucketId(tb.getBucket());
+                    if (tb.getPartitionId() != null) {
+                        pbRangeLookupReqForBucket.setPartitionId(tb.getPartitionId());
+                    }
+
+                    // Add prefix keys and collect range conditions and limits
+                    for (RangeLookupQuery rangeLookup : batch.lookups()) {
+                        pbRangeLookupReqForBucket.addPrefixKey(rangeLookup.key());
+
+                        // Add range condition if present
+                        RangeCondition rangeCondition = rangeLookup.getRangeCondition();
+                        if (rangeCondition != null) {
+                            PbRangeCondition pbRangeCondition =
+                                    pbRangeLookupReqForBucket.addRangeCondition();
+                            pbRangeCondition.setFieldName(rangeCondition.getFieldName());
+
+                            // Convert bounds to integer values
+                            if (rangeCondition.getLowerBound() != null) {
+                                int lowerBoundInt = convertToInt(rangeCondition.getLowerBound());
+                                pbRangeCondition.setLowerBound(lowerBoundInt);
+                                pbRangeCondition.setLowerInclusive(
+                                        rangeCondition.isLowerInclusive());
+                            }
+
+                            if (rangeCondition.getUpperBound() != null) {
+                                int upperBoundInt = convertToInt(rangeCondition.getUpperBound());
+                                pbRangeCondition.setUpperBound(upperBoundInt);
+                                pbRangeCondition.setUpperInclusive(
+                                        rangeCondition.isUpperInclusive());
+                            }
+                        }
+
+                        // Add limit if specified
+                        Integer limit = rangeLookup.getLimit();
+                        if (limit != null) {
+                            pbRangeLookupReqForBucket.setLimit(limit);
+                        }
+                    }
+                });
+        return request;
+    }
+
+    /**
+     * Converts various objects to integer values for range condition bounds. This simplifies the
+     * protobuf by using int32 instead of bytes.
+     */
+    private static int convertToInt(Object obj) {
+        if (obj == null) {
+            throw new IllegalArgumentException("Cannot convert null to int");
+        }
+
+        if (obj instanceof Integer) {
+            return (Integer) obj;
+        } else if (obj instanceof Long) {
+            return ((Long) obj).intValue();
+        } else if (obj instanceof Float) {
+            return ((Float) obj).intValue();
+        } else if (obj instanceof Double) {
+            return ((Double) obj).intValue();
+        } else if (obj instanceof Boolean) {
+            return (Boolean) obj ? 1 : 0;
+        } else if (obj instanceof String) {
+            try {
+                return Integer.parseInt((String) obj);
+            } catch (NumberFormatException e) {
+                return obj.hashCode(); // Fallback: use hashcode for non-numeric strings
+            }
+        } else if (obj instanceof java.sql.Date) {
+            // Convert Date to days since epoch
+            long time = ((java.sql.Date) obj).getTime();
+            return (int) (time / (24 * 60 * 60 * 1000L));
+        } else if (obj instanceof java.sql.Timestamp) {
+            // Convert Timestamp to seconds since epoch
+            long millis = ((java.sql.Timestamp) obj).getTime();
+            return (int) (millis / 1000L);
+        } else if (obj instanceof java.time.LocalDateTime) {
+            // Convert LocalDateTime to seconds since epoch
+            long epochSecond =
+                    ((java.time.LocalDateTime) obj)
+                            .atZone(java.time.ZoneId.systemDefault())
+                            .toEpochSecond();
+            return (int) epochSecond;
+        } else if (obj instanceof Number) {
+            // Generic number conversion
+            return ((Number) obj).intValue();
+        } else {
+            // For other types, use hashcode
+            return obj.hashCode();
+        }
     }
 
     public static KvSnapshots toKvSnapshots(GetLatestKvSnapshotsResponse response) {

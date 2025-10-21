@@ -591,6 +591,43 @@ public class ReplicaManager {
         responseCallback.accept(result);
     }
 
+    /** Range lookup by prefix keys and range conditions on kv store. */
+    public void rangeLookups(
+            Map<TableBucket, RangeLookupParams> entriesPerBucket,
+            Consumer<Map<TableBucket, PrefixLookupResultForBucket>> responseCallback) {
+        TableMetricGroup tableMetrics = null;
+        Map<TableBucket, PrefixLookupResultForBucket> result = new HashMap<>();
+        for (Map.Entry<TableBucket, RangeLookupParams> entry : entriesPerBucket.entrySet()) {
+            TableBucket tb = entry.getKey();
+            List<List<byte[]>> resultForBucket = new ArrayList<>();
+            try {
+                Replica replica = getReplicaOrException(tb);
+                tableMetrics = replica.tableMetrics();
+                // tableMetrics.totalRangeLookupRequests().inc(); // TODO: Add this metric
+                RangeLookupParams params = entry.getValue();
+                for (int i = 0; i < params.getPrefixKeys().size(); i++) {
+                    byte[] prefixKey = params.getPrefixKeys().get(i);
+                    List<org.apache.fluss.server.kv.rocksdb.RangeCondition> conditions =
+                            params.getRangeConditions().get(i);
+                    Integer limit = params.getLimits().get(i);
+                    List<byte[]> resultForPerKey =
+                            replica.rangeLookup(prefixKey, conditions, limit);
+                    resultForBucket.add(resultForPerKey);
+                }
+                result.put(tb, new PrefixLookupResultForBucket(tb, resultForBucket));
+            } catch (Exception e) {
+                if (isUnexpectedException(e)) {
+                    LOG.error("Error processing range lookup operation on replica {}", tb, e);
+                    // if (tableMetrics != null) {
+                    //     tableMetrics.failedRangeLookupRequests().inc(); // TODO: Add this metric
+                    // }
+                }
+                result.put(tb, new PrefixLookupResultForBucket(tb, ApiError.fromThrowable(e)));
+            }
+        }
+        responseCallback.accept(result);
+    }
+
     public void listOffsets(
             ListOffsetsParam listOffsetsParam,
             Set<TableBucket> tableBuckets,

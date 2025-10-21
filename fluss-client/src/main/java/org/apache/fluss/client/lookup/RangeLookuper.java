@@ -17,12 +17,16 @@
 
 package org.apache.fluss.client.lookup;
 
-import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.annotation.PublicEvolving;
 
-/** Enum to represent the type of lookup operation. */
-@Internal
-public enum LookupType {
-    LOOKUP,
-    PREFIX_LOOKUP,
-    RANGE_LOOKUP;
-}
+/**
+ * An extended lookuper that supports range queries on top of prefix key lookup.
+ *
+ * <p>This interface extends the basic {@link Lookuper} to provide range query capabilities. It
+ * allows users to first filter data by a prefix key, then apply additional range conditions on
+ * other fields within the filtered dataset.
+ *
+ * @since 0.8
+ */
+@PublicEvolving
+public interface RangeLookuper extends Lookuper {}

@@ -41,4 +41,7 @@ public interface Lookuper {
      * @return the result of lookup.
      */
     CompletableFuture<LookupResult> lookup(InternalRow lookupKey);
+
+    CompletableFuture<LookupResult> rangeLookup(
+            InternalRow prefixKey, Object lowerBound, Object upperBound);
 }

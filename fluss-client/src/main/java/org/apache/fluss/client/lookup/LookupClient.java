@@ -27,6 +27,7 @@ import org.apache.fluss.utils.concurrent.ExecutorThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.time.Duration;
@@ -87,6 +88,22 @@ public class LookupClient {
         PrefixLookupQuery prefixLookup = new PrefixLookupQuery(tableBucket, keyBytes);
         lookupQueue.appendLookup(prefixLookup);
         return prefixLookup.future();
+    }
+
+    public CompletableFuture<List<byte[]>> rangeLookup(
+            TableBucket tableBucket, byte[] prefixKey, RangeCondition rangeCondition) {
+        return rangeLookup(tableBucket, prefixKey, rangeCondition, null);
+    }
+
+    public CompletableFuture<List<byte[]>> rangeLookup(
+            TableBucket tableBucket,
+            byte[] prefixKey,
+            RangeCondition rangeCondition,
+            @Nullable Integer limit) {
+        RangeLookupQuery rangeLookup =
+                new RangeLookupQuery(tableBucket, prefixKey, rangeCondition, limit);
+        lookupQueue.appendLookup(rangeLookup);
+        return rangeLookup.future();
     }
 
     public void close(Duration timeout) {

@@ -1207,6 +1207,70 @@ public final class Replica {
                 });
     }
 
+    public List<byte[]> rangeLookup(
+            byte[] prefixKey,
+            List<org.apache.fluss.server.kv.rocksdb.RangeCondition> rangeConditions,
+            Integer limit) {
+        if (!isKvTable()) {
+            throw new NonPrimaryKeyTableException(
+                    "Try to do range lookup on a non primary key table: " + getTablePath());
+        }
+
+        return inReadLock(
+                leaderIsrUpdateLock,
+                () -> {
+                    try {
+                        if (!isLeader()) {
+                            throw new NotLeaderOrFollowerException(
+                                    String.format(
+                                            "Leader not local for bucket %s on tabletServer %d",
+                                            tableBucket, localTabletServerId));
+                        }
+                        checkNotNull(
+                                kvTablet, "KvTablet for the replica to get key shouldn't be null.");
+
+                        // Check if we can use sortKey optimization
+                        Schema schema = kvTablet.getSchema();
+                        if (schema.hasSortKey() && rangeConditions.size() == 1) {
+                            String sortKeyField = schema.getSortKeyField().orElse(null);
+                            org.apache.fluss.server.kv.rocksdb.RangeCondition condition =
+                                    rangeConditions.get(0);
+
+                            // If the range condition is on the sortKey field, use high-performance
+                            // sortKey lookup
+                            if (sortKeyField != null
+                                    && sortKeyField.equals(condition.getFieldName())) {
+
+                                // Convert Integer bounds to Long for sortKey lookup
+                                Long lowerBound =
+                                        condition.getLowerBound() != null
+                                                ? condition.getLowerBound().longValue()
+                                                : null;
+                                Long upperBound =
+                                        condition.getUpperBound() != null
+                                                ? condition.getUpperBound().longValue()
+                                                : null;
+
+                                // Use the high-performance sortKey range lookup
+                                return kvTablet.getRocksDBKv()
+                                        .sortKeyRangeLookup(
+                                                prefixKey, lowerBound, upperBound, limit);
+                            }
+                        }
+
+                        // Fallback to standard range lookup with value filtering
+                        return kvTablet.rangeLookup(prefixKey, rangeConditions, limit);
+                    } catch (IOException e) {
+                        String errorMsg =
+                                String.format(
+                                        "Failed to do range lookup from local kv for table bucket %s, the cause is: %s",
+                                        tableBucket, e.getMessage());
+                        LOG.error(errorMsg, e);
+                        throw new KvStorageException(errorMsg, e);
+                    }
+                });
+    }
+
     public DefaultValueRecordBatch limitKvScan(int limit) {
         if (!isKvTable()) {
             throw new NonPrimaryKeyTableException(

@@ -29,6 +29,7 @@ import org.apache.fluss.row.InternalRow.FieldGetter;
 import org.apache.fluss.row.compacted.CompactedRow;
 import org.apache.fluss.row.encode.KeyEncoder;
 import org.apache.fluss.row.encode.RowEncoder;
+import org.apache.fluss.row.encode.SortKeyAwareKeyEncoder;
 import org.apache.fluss.row.indexed.IndexedRow;
 import org.apache.fluss.types.RowType;
 
@@ -43,6 +44,7 @@ class UpsertWriterImpl extends AbstractTableWriter implements UpsertWriter {
     private static final UpsertResult UPSERT_SUCCESS = new UpsertResult();
     private static final DeleteResult DELETE_SUCCESS = new DeleteResult();
 
+    private final TableInfo tableInfo; // 添加 tableInfo 字段
     private final KeyEncoder primaryKeyEncoder;
     private final @Nullable int[] targetColumns;
 
@@ -59,14 +61,24 @@ class UpsertWriterImpl extends AbstractTableWriter implements UpsertWriter {
             @Nullable int[] partialUpdateColumns,
             WriterClient writerClient) {
         super(tablePath, tableInfo, writerClient);
+        this.tableInfo = tableInfo; // 保存 tableInfo 字段
         RowType rowType = tableInfo.getRowType();
         sanityCheck(rowType, tableInfo.getPrimaryKeys(), partialUpdateColumns);
 
         this.targetColumns = partialUpdateColumns;
         DataLakeFormat lakeFormat = tableInfo.getTableConfig().getDataLakeFormat().orElse(null);
-        // encode primary key using physical primary key
-        this.primaryKeyEncoder =
-                KeyEncoder.of(rowType, tableInfo.getPhysicalPrimaryKeys(), lakeFormat);
+
+        // Create primary key encoder - with sortKey support if defined
+        if (tableInfo.getSchema().hasSortKey()) {
+            String sortKeyField = tableInfo.getSchema().getSortKeyField().orElse(null);
+            this.primaryKeyEncoder =
+                    createSortKeyAwarePrimaryKeyEncoder(
+                            rowType, tableInfo.getPhysicalPrimaryKeys(), sortKeyField, lakeFormat);
+        } else {
+            // Standard primary key encoding without sortKey
+            this.primaryKeyEncoder =
+                    KeyEncoder.of(rowType, tableInfo.getPhysicalPrimaryKeys(), lakeFormat);
+        }
         this.bucketKeyEncoder =
                 tableInfo.isDefaultBucketKey()
                         ? primaryKeyEncoder
@@ -124,9 +136,14 @@ class UpsertWriterImpl extends AbstractTableWriter implements UpsertWriter {
      */
     public CompletableFuture<UpsertResult> upsert(InternalRow row) {
         checkFieldCount(row);
-        byte[] key = primaryKeyEncoder.encodeKey(row);
+
+        // Construct key with sortKey support
+        byte[] key = buildKeyWithSortKey(row);
         byte[] bucketKey =
-                bucketKeyEncoder == primaryKeyEncoder ? key : bucketKeyEncoder.encodeKey(row);
+                bucketKeyEncoder == primaryKeyEncoder
+                        ? primaryKeyEncoder.encodeKey(row)
+                        : bucketKeyEncoder.encodeKey(row); // bucket key remains prefix-only
+
         WriteRecord record =
                 WriteRecord.forUpsert(
                         getPhysicalPath(row), encodeRow(row), key, bucketKey, targetColumns);
@@ -142,12 +159,49 @@ class UpsertWriterImpl extends AbstractTableWriter implements UpsertWriter {
      */
     public CompletableFuture<DeleteResult> delete(InternalRow row) {
         checkFieldCount(row);
-        byte[] key = primaryKeyEncoder.encodeKey(row);
+
+        // Construct key with sortKey support
+        byte[] key = buildKeyWithSortKey(row);
         byte[] bucketKey =
-                bucketKeyEncoder == primaryKeyEncoder ? key : bucketKeyEncoder.encodeKey(row);
+                bucketKeyEncoder == primaryKeyEncoder
+                        ? primaryKeyEncoder.encodeKey(row)
+                        : bucketKeyEncoder.encodeKey(row); // bucket key remains prefix-only
+
         WriteRecord record =
                 WriteRecord.forDelete(getPhysicalPath(row), key, bucketKey, targetColumns);
         return send(record).thenApply(ignored -> DELETE_SUCCESS);
+    }
+
+    /**
+     * Creates a sortKey-aware primary key encoder that handles sortKey serialization.
+     *
+     * @param rowType the row type
+     * @param primaryKeys the primary key field names
+     * @param sortKeyField the sortKey field name (must be part of primary keys)
+     * @param lakeFormat the data lake format
+     * @return a KeyEncoder that properly handles sortKey serialization
+     */
+    private KeyEncoder createSortKeyAwarePrimaryKeyEncoder(
+            RowType rowType,
+            List<String> primaryKeys,
+            String sortKeyField,
+            DataLakeFormat lakeFormat) {
+
+        // Validate that sortKey is part of primary key
+        if (!primaryKeys.contains(sortKeyField)) {
+            throw new IllegalStateException(
+                    "SortKey field '" + sortKeyField + "' must be part of the primary key");
+        }
+
+        return new SortKeyAwareKeyEncoder(rowType, primaryKeys, sortKeyField, lakeFormat);
+    }
+
+    /**
+     * Builds a key using the configured primary key encoder. The encoder automatically handles
+     * sortKey serialization if defined.
+     */
+    private byte[] buildKeyWithSortKey(InternalRow row) {
+        return primaryKeyEncoder.encodeKey(row);
     }
 
     private BinaryRow encodeRow(InternalRow row) {

@@ -81,6 +81,8 @@ import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.messages.PutKvRequest;
 import org.apache.fluss.rpc.messages.PutKvResponse;
+import org.apache.fluss.rpc.messages.RangeLookupRequest;
+import org.apache.fluss.rpc.messages.RangeLookupResponse;
 import org.apache.fluss.rpc.messages.StopReplicaRequest;
 import org.apache.fluss.rpc.messages.StopReplicaResponse;
 import org.apache.fluss.rpc.messages.TableExistsRequest;
@@ -188,6 +190,11 @@ public class TestTabletServerGateway implements TabletServerGateway {
     @Override
     public CompletableFuture<PrefixLookupResponse> prefixLookup(PrefixLookupRequest request) {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public CompletableFuture<RangeLookupResponse> rangeLookup(RangeLookupRequest request) {
+        return null;
     }
 
     @Override

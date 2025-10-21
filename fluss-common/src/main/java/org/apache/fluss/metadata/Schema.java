@@ -60,11 +60,14 @@ public final class Schema implements Serializable {
 
     private final List<Column> columns;
     private final @Nullable PrimaryKey primaryKey;
+    private final @Nullable String sortKeyField;
     private final RowType rowType;
 
-    private Schema(List<Column> columns, @Nullable PrimaryKey primaryKey) {
+    private Schema(
+            List<Column> columns, @Nullable PrimaryKey primaryKey, @Nullable String sortKeyField) {
         this.columns = normalizeColumns(columns, primaryKey);
         this.primaryKey = primaryKey;
+        this.sortKeyField = validateSortKeyField(columns, sortKeyField);
         // pre-create the row type as it is the most frequently used part of the schema
         this.rowType =
                 new RowType(
@@ -74,6 +77,38 @@ public final class Schema implements Serializable {
                                                 new DataField(
                                                         column.getName(), column.getDataType()))
                                 .collect(Collectors.toList()));
+    }
+
+    /** Validates that the sortKey field exists and is of BIGINT type. */
+    private String validateSortKeyField(List<Column> columns, @Nullable String sortKeyField) {
+        if (sortKeyField == null) {
+            return null;
+        }
+
+        // Find the sortKey field in columns
+        Optional<Column> sortKeyColumn =
+                columns.stream()
+                        .filter(column -> sortKeyField.equals(column.getName()))
+                        .findFirst();
+
+        if (!sortKeyColumn.isPresent()) {
+            throw new IllegalArgumentException(
+                    "SortKey field '" + sortKeyField + "' not found in schema columns");
+        }
+
+        // Verify the sortKey field is BIGINT type
+        DataType sortKeyType = sortKeyColumn.get().getDataType();
+        if (!sortKeyType
+                .getTypeRoot()
+                .equals(org.apache.fluss.types.DataTypes.BIGINT().getTypeRoot())) {
+            throw new IllegalArgumentException(
+                    "SortKey field '"
+                            + sortKeyField
+                            + "' must be BIGINT type, but found: "
+                            + sortKeyType);
+        }
+
+        return sortKeyField;
     }
 
     public List<Column> getColumns() {
@@ -100,6 +135,26 @@ public final class Schema implements Serializable {
     /** Returns the primary key column names, if any, otherwise returns an empty array. */
     public List<String> getPrimaryKeyColumnNames() {
         return getPrimaryKey().map(PrimaryKey::getColumnNames).orElse(Collections.emptyList());
+    }
+
+    /** Returns the sort key field name, if any. */
+    public Optional<String> getSortKeyField() {
+        return Optional.ofNullable(sortKeyField);
+    }
+
+    /** Returns true if this schema has a sort key field. */
+    public boolean hasSortKey() {
+        return sortKeyField != null;
+    }
+
+    /** Returns the sort key field index, or -1 if no sort key is defined. */
+    public int getSortKeyFieldIndex() {
+        if (sortKeyField == null) {
+            return -1;
+        }
+
+        final List<String> columnNames = getColumnNames();
+        return columnNames.indexOf(sortKeyField);
     }
 
     /**
@@ -164,12 +219,13 @@ public final class Schema implements Serializable {
         }
         Schema schema = (Schema) o;
         return Objects.equals(columns, schema.columns)
-                && Objects.equals(primaryKey, schema.primaryKey);
+                && Objects.equals(primaryKey, schema.primaryKey)
+                && Objects.equals(sortKeyField, schema.sortKeyField);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(columns, primaryKey);
+        return Objects.hash(columns, primaryKey, sortKeyField);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -188,6 +244,7 @@ public final class Schema implements Serializable {
     public static final class Builder {
         private final List<Column> columns;
         private @Nullable PrimaryKey primaryKey;
+        private @Nullable String sortKeyField;
 
         private Builder() {
             columns = new ArrayList<>();
@@ -198,6 +255,9 @@ public final class Schema implements Serializable {
             columns.addAll(schema.columns);
             if (schema.primaryKey != null) {
                 primaryKeyNamed(schema.primaryKey.constraintName, schema.primaryKey.columnNames);
+            }
+            if (schema.sortKeyField != null) {
+                sortKey(schema.sortKeyField);
             }
             return this;
         }
@@ -314,9 +374,28 @@ public final class Schema implements Serializable {
             return this;
         }
 
+        /**
+         * Declares a sort key field for optimized range queries. The sort key field will be
+         * included in the storage key structure to enable efficient range scans.
+         *
+         * <p>The sort key field must be of BIGINT type and will be serialized using a special
+         * unsigned format that ensures dictionary order equals numeric order.
+         *
+         * @param fieldName the field name to use as sort key (must be BIGINT type)
+         * @return this builder
+         */
+        public Builder sortKey(String fieldName) {
+            checkArgument(
+                    !StringUtils.isNullOrWhitespaceOnly(fieldName),
+                    "Sort key field name must not be empty.");
+            checkState(sortKeyField == null, "Multiple sort keys are not supported.");
+            sortKeyField = fieldName;
+            return this;
+        }
+
         /** Returns an instance of an {@link Schema}. */
         public Schema build() {
-            return new Schema(columns, primaryKey);
+            return new Schema(columns, primaryKey, sortKeyField);
         }
     }
 

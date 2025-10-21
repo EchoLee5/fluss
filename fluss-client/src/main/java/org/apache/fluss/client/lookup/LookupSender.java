@@ -27,9 +27,12 @@ import org.apache.fluss.rpc.messages.LookupRequest;
 import org.apache.fluss.rpc.messages.LookupResponse;
 import org.apache.fluss.rpc.messages.PbLookupRespForBucket;
 import org.apache.fluss.rpc.messages.PbPrefixLookupRespForBucket;
+import org.apache.fluss.rpc.messages.PbRangeLookupRespForBucket;
 import org.apache.fluss.rpc.messages.PbValueList;
 import org.apache.fluss.rpc.messages.PrefixLookupRequest;
 import org.apache.fluss.rpc.messages.PrefixLookupResponse;
+import org.apache.fluss.rpc.messages.RangeLookupRequest;
+import org.apache.fluss.rpc.messages.RangeLookupResponse;
 import org.apache.fluss.rpc.protocol.ApiError;
 import org.apache.fluss.utils.types.Tuple2;
 
@@ -45,6 +48,7 @@ import java.util.stream.Collectors;
 
 import static org.apache.fluss.client.utils.ClientRpcMessageUtils.makeLookupRequest;
 import static org.apache.fluss.client.utils.ClientRpcMessageUtils.makePrefixLookupRequest;
+import static org.apache.fluss.client.utils.ClientRpcMessageUtils.makeRangeLookupRequest;
 
 /**
  * This background thread pool lookup operations from {@link #lookupQueue}, and send lookup requests
@@ -158,6 +162,8 @@ class LookupSender implements Runnable {
             sendLookupRequest(gateway, lookupBatches);
         } else if (lookupType == LookupType.PREFIX_LOOKUP) {
             sendPrefixLookupRequest(gateway, lookupBatches);
+        } else if (lookupType == LookupType.RANGE_LOOKUP) {
+            sendRangeLookupRequest(gateway, lookupBatches);
         } else {
             throw new IllegalArgumentException("Unsupported lookup type: " + lookupType);
         }
@@ -207,6 +213,28 @@ class LookupSender implements Runnable {
                                 makePrefixLookupRequest(tableId, prefixLookupBatch.values()),
                                 tableId,
                                 prefixLookupBatch));
+    }
+
+    private void sendRangeLookupRequest(
+            TabletServerGateway gateway, List<AbstractLookupQuery<?>> rangeLookups) {
+        // table id -> (bucket -> lookups)
+        Map<Long, Map<TableBucket, RangeLookupBatch>> lookupByTableId = new HashMap<>();
+        for (AbstractLookupQuery<?> abstractLookupQuery : rangeLookups) {
+            RangeLookupQuery rangeLookup = (RangeLookupQuery) abstractLookupQuery;
+            TableBucket tableBucket = rangeLookup.tableBucket();
+            lookupByTableId
+                    .computeIfAbsent(tableBucket.getTableId(), (k) -> new HashMap<>())
+                    .computeIfAbsent(tableBucket, RangeLookupBatch::new)
+                    .addLookup(rangeLookup);
+        }
+
+        lookupByTableId.forEach(
+                (tableId, rangeLookupBatch) ->
+                        sendRangeLookupRequestAndHandleResponse(
+                                gateway,
+                                makeRangeLookupRequest(tableId, rangeLookupBatch.values()),
+                                tableId,
+                                rangeLookupBatch));
     }
 
     private void sendLookupRequestAndHandleResponse(
@@ -265,6 +293,38 @@ class LookupSender implements Runnable {
                         e -> {
                             try {
                                 handlePrefixLookupException(e, lookupsByBucket);
+                                return null;
+                            } finally {
+                                maxInFlightReuqestsSemaphore.release();
+                            }
+                        });
+    }
+
+    private void sendRangeLookupRequestAndHandleResponse(
+            TabletServerGateway gateway,
+            RangeLookupRequest rangeLookupRequest,
+            long tableId,
+            Map<TableBucket, RangeLookupBatch> lookupsByBucket) {
+        try {
+            maxInFlightReuqestsSemaphore.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new FlussRuntimeException("interrupted:", e);
+        }
+        gateway.rangeLookup(rangeLookupRequest)
+                .thenAccept(
+                        rangeLookupResponse -> {
+                            try {
+                                handleRangeLookupResponse(
+                                        tableId, rangeLookupResponse, lookupsByBucket);
+                            } finally {
+                                maxInFlightReuqestsSemaphore.release();
+                            }
+                        })
+                .exceptionally(
+                        e -> {
+                            try {
+                                handleRangeLookupException(e, lookupsByBucket);
                                 return null;
                             } finally {
                                 maxInFlightReuqestsSemaphore.release();
@@ -367,6 +427,45 @@ class LookupSender implements Runnable {
         // TODO If error, we need to retry send the request instead of throw exception.
         LOG.warn("Get error prefix lookup response. Error: {}", error.formatErrMsg());
         for (PrefixLookupBatch lookupBatch : lookupsByBucket.values()) {
+            lookupBatch.completeExceptionally(error.exception());
+        }
+    }
+
+    private void handleRangeLookupResponse(
+            long tableId,
+            RangeLookupResponse rangeLookupResponse,
+            Map<TableBucket, RangeLookupBatch> rangeLookupsByBucket) {
+        for (PbRangeLookupRespForBucket pbRespForBucket :
+                rangeLookupResponse.getBucketsRespsList()) {
+            TableBucket tableBucket =
+                    new TableBucket(
+                            tableId,
+                            pbRespForBucket.hasPartitionId()
+                                    ? pbRespForBucket.getPartitionId()
+                                    : null,
+                            pbRespForBucket.getBucketId());
+            RangeLookupBatch rangeLookupBatch = rangeLookupsByBucket.get(tableBucket);
+            if (rangeLookupBatch != null) {
+                // convert to List<List<byte[]>>
+                List<List<byte[]>> values = new ArrayList<>();
+                for (PbValueList pbValueList : pbRespForBucket.getValueListsList()) {
+                    List<byte[]> valueList = new ArrayList<>();
+                    for (int j = 0; j < pbValueList.getValuesCount(); j++) {
+                        valueList.add(pbValueList.getValueAt(j));
+                    }
+                    values.add(valueList);
+                }
+                rangeLookupBatch.complete(values);
+            }
+        }
+    }
+
+    private void handleRangeLookupException(
+            Throwable t, Map<TableBucket, RangeLookupBatch> lookupsByBucket) {
+        ApiError error = ApiError.fromThrowable(t);
+        // TODO If error, we need to retry send the request instead of throw exception.
+        LOG.warn("Get error range lookup response. Error: {}", error.formatErrMsg());
+        for (RangeLookupBatch lookupBatch : lookupsByBucket.values()) {
             lookupBatch.completeExceptionally(error.exception());
         }
     }
